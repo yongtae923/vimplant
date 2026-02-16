@@ -1,0 +1,59 @@
+# -----------------------------
+# Python cache and build files
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# -----------------------------
+# Virtual environments
+# -----------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# -----------------------------
+# Jupyter
+# -----------------------------
+.ipynb_checkpoints/
+
+# -----------------------------
+# Test and coverage outputs
+# -----------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# -----------------------------
+# IDE and editor settings
+# -----------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# -----------------------------
+# OS generated files
+# -----------------------------
+.DS_Store
+Thumbs.db
+
+# -----------------------------
+# Project data and runtime logs
+# -----------------------------
+data/
+*.log
+
+# Keep this if you want to track an empty data folder
+!data/.gitkeep
