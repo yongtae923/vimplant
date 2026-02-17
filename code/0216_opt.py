@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-import pickle
+import os
 import sys
 import warnings
 from pathlib import Path
-from typing import Iterable, Sequence
+from time import perf_counter
+from typing import Iterable
+
+# Ensure subprocess workers (loky/multiprocessing) also suppress this warning.
+_worker_warning_rule = "ignore::UserWarning:numpy._core.getlimits"
+_py_warnings = os.environ.get("PYTHONWARNINGS", "")
+if _worker_warning_rule not in _py_warnings.split(","):
+    os.environ["PYTHONWARNINGS"] = f"{_py_warnings},{_worker_warning_rule}".strip(",")
 
 # Hide known non-critical longdouble warning on some WSL/numpy builds.
 warnings.filterwarnings(
@@ -14,10 +21,15 @@ warnings.filterwarnings(
     message=r"Signature .* for <class 'numpy\.longdouble'> does not match any known type.*",
     category=UserWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"numpy\._core\.getlimits",
+)
 
-import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
+from tqdm import tqdm
 from skopt import gp_minimize
 from skopt.space import Integer
 from skopt.utils import cook_initial_point_generator, use_named_args
@@ -52,7 +64,10 @@ np.seterr(divide="ignore", invalid="ignore")
 # Hardcoded run configuration
 SUBJECTS = ["100610"]
 DATA_ROOT = PROJECT_ROOT / "data" / "input" / "100610"
-OUTPUT_ROOT = Path("data/output/opt")
+OUTPUT_ROOT = PROJECT_ROOT / "data" / "output" / "opt_npz"
+TOTAL_CORES = os.cpu_count() or 1
+N_JOBS = max(1, int(TOTAL_CORES * 0.9))
+OVERWRITE = False
 
 # Optimization setup from notebook
 DIM_ALPHA = Integer(name="alpha", low=-90, high=90)
@@ -126,34 +141,62 @@ def custom_stopper(res, n: int = 5, delta: float = 0.2, thresh: float = 0.05):
     return (abs((best - worst) / worst) < delta) and (best < thresh)
 
 
-def save_result_text(
-    txt_path: Path,
+def save_result_npz(
+    npz_path: Path,
     subject: str,
     hemisphere: str,
     target_name: str,
     loss_name: str,
-    best_x: Sequence[float],
     grid_valid: bool,
     dice: float,
     hell_d: float,
     grid_yield: float,
+    res,
+    contacts_xyz_moved: np.ndarray,
+    good_h: np.ndarray,
+    v1_h: np.ndarray,
+    v2_h: np.ndarray,
+    v3_h: np.ndarray,
+    phos_all: np.ndarray,
+    phos_v1: np.ndarray,
+    phos_v2: np.ndarray,
+    phos_v3: np.ndarray,
+    target_density: np.ndarray,
+    phosphene_map: np.ndarray,
+    optimization_elapsed_seconds: float,
+    sample_elapsed_seconds: float,
 ) -> None:
-    with txt_path.open("w", encoding="utf-8") as f:
-        f.write(f"Subject: {subject}\n")
-        f.write(f"Hemisphere: {hemisphere}\n")
-        f.write(f"Target: {target_name}\n")
-        f.write(f"Loss: {loss_name}\n")
-        f.write(f"Threshold: {THRESH}\n")
-        f.write("Best parameters:\n")
-        f.write(f"  Alpha: {best_x[0]}\n")
-        f.write(f"  Beta: {best_x[1]}\n")
-        f.write(f"  Offset from base: {best_x[2]}\n")
-        f.write(f"  Shank length: {best_x[3]}\n")
-        f.write("Results:\n")
-        f.write(f"  Grid valid: {grid_valid}\n")
-        f.write(f"  Dice coefficient: {dice:.6f}\n")
-        f.write(f"  Hellinger distance: {hell_d:.6f}\n")
-        f.write(f"  Grid yield: {grid_yield:.6f}\n")
+    """Save optimization outputs and plotting data in one NPZ bundle."""
+    np.savez_compressed(
+        npz_path,
+        subject=np.array(subject),
+        hemisphere=np.array(hemisphere),
+        target_name=np.array(target_name),
+        loss_name=np.array(loss_name),
+        threshold=np.array(THRESH, dtype=np.float64),
+        best_x=np.asarray(res.x, dtype=np.float64),
+        best_fun=np.array(float(res.fun), dtype=np.float64),
+        x_iters=np.asarray(res.x_iters, dtype=np.float64),
+        func_vals=np.asarray(res.func_vals, dtype=np.float64),
+        n_calls=np.array(len(res.x_iters), dtype=np.int32),
+        optimization_elapsed_seconds=np.array(optimization_elapsed_seconds, dtype=np.float64),
+        sample_elapsed_seconds=np.array(sample_elapsed_seconds, dtype=np.float64),
+        grid_valid=np.array(grid_valid, dtype=np.bool_),
+        dice=np.array(dice, dtype=np.float64),
+        hell_d=np.array(hell_d, dtype=np.float64),
+        grid_yield=np.array(grid_yield, dtype=np.float64),
+        contacts_xyz_moved=np.asarray(contacts_xyz_moved),
+        good_coords=np.asarray(good_h),
+        good_coords_V1=np.asarray(v1_h),
+        good_coords_V2=np.asarray(v2_h),
+        good_coords_V3=np.asarray(v3_h),
+        phosphenes=np.asarray(phos_all),
+        phosphenes_V1=np.asarray(phos_v1),
+        phosphenes_V2=np.asarray(phos_v2),
+        phosphenes_V3=np.asarray(phos_v3),
+        target_density=np.asarray(target_density, dtype=np.float32),
+        phosphene_map=np.asarray(phosphene_map, dtype=np.float32),
+    )
 
 
 def run() -> None:
@@ -161,19 +204,13 @@ def run() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
 
     subjects = SUBJECTS
+    print(f"output npz dir: {output_root}")
+    print(f"overwrite: {OVERWRITE}")
+    print(f"cpu cores: total={TOTAL_CORES}, using={N_JOBS} (90%)")
     print(f"number of subjects: {len(subjects)}")
 
     for target_template, target_name in zip(TARGET_MAPS, TARGET_NAMES):
         target_density = normalize_density(target_template)
-        bin_thresh = np.percentile(target_density, DC_PERCENTILE)
-        target_density_bin = (target_density > bin_thresh).astype(bool)
-        fig, _ = plt.subplots(1, 2, figsize=(10, 4))
-        plt.subplot(1, 2, 1).imshow(target_density, cmap="seismic")
-        plt.title("Target density")
-        plt.subplot(1, 2, 2).imshow(target_density_bin, cmap="seismic")
-        plt.title("Target binary")
-        plt.tight_layout()
-        plt.close(fig)
 
         for (a, b, c), loss_name in zip(LOSS_COMB, LOSS_NAMES):
             for subject in subjects:
@@ -232,19 +269,23 @@ def run() -> None:
 
                 for gm_mask, hem, start_location, good_h, v1_h, v2_h, v3_h, dim_beta in hemi_iter:
                     data_id = f"{subject}_{hem}_V1_n1000_1x10_{loss_name}_{THRESH}_{target_name}"
-                    pkl_path = output_root / f"{data_id}.pkl"
-                    txt_path = output_root / f"{data_id}.txt"
-                    png_path = output_root / f"{data_id}_phosphene_map.png"
+                    npz_path = output_root / f"{data_id}.npz"
 
-                    if pkl_path.exists():
-                        print(f"{subject} {hem} {target_name} {loss_name} already processed.")
+                    if npz_path.exists() and not OVERWRITE:
+                        print(f"[skip] {npz_path.name} already exists")
                         continue
 
                     dimensions = [DIM_ALPHA, dim_beta, DIM_OFFSET, DIM_SHANK]
                     lhs2 = cook_initial_point_generator("lhs", criterion="maximin")
+                    sample_t0 = perf_counter()
 
                     @use_named_args(dimensions=dimensions)
                     def objective(alpha, beta, offset_from_base, shank_length):
+                        warnings.filterwarnings(
+                            "ignore",
+                            message=r"Signature .* for <class 'numpy\.longdouble'> does not match any known type.*",
+                            category=UserWarning,
+                        )
                         penalty = 0.25
                         new_angle = (float(alpha), float(beta), 0)
 
@@ -262,7 +303,6 @@ def run() -> None:
 
                         phos_v1 = get_phosphenes(contacts_xyz_moved, v1_h, polar_map, ecc_map, sigma_map)
                         if phos_v1.size == 0:
-                            print("    3.00 0.00 0.00 1.00 False")
                             return 3.0
 
                         m_inv = 1 / get_cortical_magnification(phos_v1[:, 1], CORT_MAG_MODEL)
@@ -296,26 +336,33 @@ def run() -> None:
                         if np.isnan(cost) or np.isinf(cost):
                             cost = 3.0
 
-                        print(
-                            "    ",
-                            f"{cost:.2f}",
-                            f"{dice:.2f}",
-                            f"{grid_yield:.2f}",
-                            f"{par3:.2f}",
-                            grid_valid,
-                        )
                         return float(cost)
 
-                    res = gp_minimize(
-                        objective,
-                        x0=X0,
-                        dimensions=dimensions,
-                        n_jobs=-1,
-                        n_calls=NUM_CALLS,
-                        n_initial_points=NUM_INITIAL_POINTS,
-                        initial_point_generator=lhs2,
-                        callback=[custom_stopper],
+                    def _callback_with_tqdm(res):
+                        pbar.update(1)
+                        return custom_stopper(res)
+
+                    pbar = tqdm(
+                        total=NUM_CALLS,
+                        desc=f"{subject}_{hem}_{target_name}",
+                        unit="eval",
+                        leave=True,
                     )
+                    optimization_t0 = perf_counter()
+                    try:
+                        res = gp_minimize(
+                            objective,
+                            x0=X0,
+                            dimensions=dimensions,
+                            n_jobs=N_JOBS,
+                            n_calls=NUM_CALLS,
+                            n_initial_points=NUM_INITIAL_POINTS,
+                            initial_point_generator=lhs2,
+                            callback=[_callback_with_tqdm],
+                        )
+                    finally:
+                        pbar.close()
+                    optimization_elapsed_seconds = perf_counter() - optimization_t0
 
                     print(
                         f"subject {subject} {hem}, best alpha: {res.x[0]}, "
@@ -358,50 +405,32 @@ def run() -> None:
                     hell_d = hellinger_distance(phosphene_map.flatten(), target_density.flatten())
                     print(f"best dice, yield, KL: {dice}, {grid_yield}, {hell_d}")
 
-                    map_bin = phosphene_map > np.percentile(phosphene_map, DC_PERCENTILE)
-                    fig, _ = plt.subplots(1, 2, figsize=(10, 4))
-                    plt.subplot(1, 2, 1).imshow(map_bin, cmap="seismic", vmin=0, vmax=max(np.max(phosphene_map) / 100, 1e-6))
-                    plt.title("Binarized map")
-                    plt.subplot(1, 2, 2).imshow(phosphene_map, cmap="seismic", vmin=0, vmax=max(np.max(phosphene_map) / 100, 1e-6))
-                    plt.title("Raw phosphene map")
-                    plt.tight_layout()
-                    plt.savefig(png_path, dpi=300, bbox_inches="tight")
-                    plt.close(fig)
-
-                    with pkl_path.open("wb") as f:
-                        pickle.dump(
-                            [
-                                res,
-                                grid_valid,
-                                dice,
-                                hell_d,
-                                grid_yield,
-                                contacts_xyz_moved,
-                                good_h,
-                                v1_h,
-                                v2_h,
-                                v3_h,
-                                phos_all,
-                                phos_v1,
-                                phos_v2,
-                                phos_v3,
-                            ],
-                            f,
-                            protocol=-1,
-                        )
-                    save_result_text(
-                        txt_path=txt_path,
+                    save_result_npz(
+                        npz_path=npz_path,
                         subject=subject,
                         hemisphere=hem,
                         target_name=target_name,
                         loss_name=loss_name,
-                        best_x=res.x,
                         grid_valid=grid_valid,
                         dice=dice,
                         hell_d=hell_d,
                         grid_yield=grid_yield,
+                        res=res,
+                        contacts_xyz_moved=contacts_xyz_moved,
+                        good_h=good_h,
+                        v1_h=v1_h,
+                        v2_h=v2_h,
+                        v3_h=v3_h,
+                        phos_all=phos_all,
+                        phos_v1=phos_v1,
+                        phos_v2=phos_v2,
+                        phos_v3=phos_v3,
+                        target_density=target_density,
+                        phosphene_map=phosphene_map,
+                        optimization_elapsed_seconds=optimization_elapsed_seconds,
+                        sample_elapsed_seconds=(perf_counter() - sample_t0),
                     )
-                    print(f"saved: {pkl_path}")
+                    print(f"saved: {npz_path}")
 
 
 if __name__ == "__main__":
