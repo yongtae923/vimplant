@@ -1,4 +1,11 @@
 # code/0217_opt_select.py
+"""
+Greedy selection strategy:
+- Start with no active contacts.
+- At each step, test every remaining contact by adding exactly one contact.
+- Select the contact that gives the minimum trial loss (argmin).
+- Stop when improvement becomes too small after enough channels are selected.
+"""
 from __future__ import annotations
 
 import os
