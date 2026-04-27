@@ -65,8 +65,8 @@ SUBJECTS = ["100610"]
 DATA_ROOT = PROJECT_ROOT / "data" / "input" / "100610"
 OUTPUT_ROOT = PROJECT_ROOT / "data" / "output" / "opt_npz"
 TOTAL_CORES = os.cpu_count() or 1
-# Use 50% of total CPU cores for parallel workers
-N_JOBS = max(1, int(TOTAL_CORES * 0.5))
+# Use all available CPU cores for parallel workers
+N_JOBS = max(1, TOTAL_CORES)
 OVERWRITE = False
 
 # Optimization setup from notebook
@@ -82,7 +82,6 @@ NUM_INITIAL_POINTS = 10
 DC_PERCENTILE = 50
 N_CONTACTPOINTS_SHANK = 10
 SPACING_ALONG_XY = 1
-WINDOWSIZE = 1000
 
 LOSS_COMB = [(1, 0.1, 1)]
 LOSS_NAMES = ["dice-yield-HD"]
@@ -205,11 +204,14 @@ def run() -> None:
     subjects = SUBJECTS
     print(f"output npz dir: {output_root}")
     print(f"overwrite: {OVERWRITE}")
-    print(f"cpu cores: total={TOTAL_CORES}, using={N_JOBS} (50%)")
+    print(f"cpu cores: total={TOTAL_CORES}, using={N_JOBS}")
     print(f"number of subjects: {len(subjects)}")
 
     for target_template, target_name in zip(TARGET_MAPS, TARGET_NAMES):
         target_density = normalize_density(target_template)
+        if target_density.ndim != 2:
+            raise ValueError(f"target map must be 2D, got shape={target_density.shape}")
+        target_map_shape = target_density.shape
 
         for (a, b, c), loss_name in zip(LOSS_COMB, LOSS_NAMES):
             for subject in subjects:
@@ -309,7 +311,7 @@ def run() -> None:
                         sigmas = (spread * m_inv) / 2
                         phos_v1[:, 2] = sigmas
 
-                        phosphene_map = np.zeros((WINDOWSIZE, WINDOWSIZE), dtype="float32")
+                        phosphene_map = np.zeros(target_map_shape, dtype="float32")
                         phosphene_map = prf_to_phos(phosphene_map, phos_v1, view_angle=VIEW_ANGLE, phSizeScale=1)
 
                         max_ph = np.max(phosphene_map)
@@ -392,7 +394,7 @@ def run() -> None:
                         spread = cortical_spread(AMP)
                         phos_v1[:, 2] = (spread * m_inv) / 2
 
-                    phosphene_map = np.zeros((WINDOWSIZE, WINDOWSIZE), dtype="float32")
+                    phosphene_map = np.zeros(target_map_shape, dtype="float32")
                     phosphene_map = prf_to_phos(phosphene_map, phos_v1, view_angle=VIEW_ANGLE, phSizeScale=1)
                     if np.max(phosphene_map) > 0:
                         phosphene_map /= np.max(phosphene_map)
