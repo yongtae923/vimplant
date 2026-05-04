@@ -36,8 +36,8 @@ def hellinger_distance(p, q):
 
 ## loss functions
 def KL(a, b):
-    a = np.asarray(a, dtype=np.float)
-    b = np.asarray(b, dtype=np.float)
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
         
     # replace zeros with smallest value
     a[a==0] = sys.float_info.min    

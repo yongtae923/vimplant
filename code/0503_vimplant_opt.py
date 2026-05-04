@@ -69,16 +69,21 @@ if not np.geterr().get("divide"):
 np.seterr(divide="ignore", invalid="ignore")
 
 
-# Hardcoded run configuration
-SUBJECTS = ["100610"]
-DATA_ROOT = PROJECT_ROOT / "data" / "input" / "100610"
-OUTPUT_ROOT = PROJECT_ROOT / "data" / "output0421"
+# Run configuration
+OUTPUT_ROOT = PROJECT_ROOT / "data" / "0503_output"
 TOTAL_CORES = os.cpu_count() or 1
-# Use all available CPU cores for parallel workers
 N_JOBS = max(1, TOTAL_CORES)
 OVERWRITE = False
 RESEARCH_SEED = 42
 BASELINE_REPEATS = 5
+
+DATASET_DIRS: list[tuple[str, Path]] = []
+for _ds in ("hcp_fmri", "deep_fmri"):
+    _ds_path = PROJECT_ROOT / "data" / _ds
+    if _ds_path.exists():
+        for _sub_path in sorted(_ds_path.iterdir()):
+            if _sub_path.is_dir():
+                DATASET_DIRS.append((_ds, _sub_path))
 
 # Optimization setup from notebook
 DIM_ALPHA = Integer(name="alpha", low=-90, high=90)
@@ -98,7 +103,7 @@ LOSS_COMB = [(1, 0.1, 1)]
 LOSS_NAMES = ["dice-yield-HD"]
 THRESH = 0.05
 
-TARGET_DIR = PROJECT_ROOT / "data" / "targets0421"
+TARGET_DIR = PROJECT_ROOT / "data" / "targets0503"
 if not TARGET_DIR.exists():
     raise FileNotFoundError(f"target directory not found: {TARGET_DIR}")
 
@@ -364,11 +369,12 @@ def run() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     set_reproducibility(RESEARCH_SEED)
 
-    subjects = SUBJECTS
+    if not DATASET_DIRS:
+        raise FileNotFoundError("no samples found in hcp_fmri or deep_fmri directories")
     print(f"output dir: {output_root}")
     print(f"overwrite: {OVERWRITE}")
     print(f"cpu cores: total={TOTAL_CORES}, using={N_JOBS}")
-    print(f"number of subjects: {len(subjects)}")
+    print(f"number of samples: {len(DATASET_DIRS)}")
     target_paths = sorted(TARGET_DIR.glob("*.npy"))
     if not target_paths:
         raise FileNotFoundError(f"no target npy files found in: {TARGET_DIR}")
@@ -379,60 +385,67 @@ def run() -> None:
     runtime_env = collect_runtime_environment()
     print(f"baseline_seconds: {baseline_seconds:.6f}")
 
-    aggregate_records: list[dict] = []
+    global_aggregate_records: list[dict] = []
 
-    for (a, b, c), loss_name in zip(LOSS_COMB, LOSS_NAMES):
-        for target_path in target_paths:
-            target_name = target_path.stem
-            target_density = normalize_density(np.load(target_path))
-            if target_density.ndim != 2:
-                raise ValueError(f"target map must be 2D, got shape={target_density.shape} for {target_path}")
-            target_map_shape = target_density.shape
+    for dataset_name, data_dir in DATASET_DIRS:
+        subject = data_dir.name
+        sample_id = f"{dataset_name}_{subject}"
+        sample_dir = output_root / sample_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\n=== sample: {sample_id} ===")
 
-            for subject in subjects:
-                data_dir = DATA_ROOT
-                if not data_dir.exists():
-                    print(f"[skip] subject {subject}: data dir not found -> {data_dir}")
-                    continue
+        if not data_dir.exists():
+            print(f"[skip] {sample_id}: data dir not found -> {data_dir}")
+            continue
 
-                try:
-                    polar_map = cast(Any, nib).load(str(data_dir / FNAME_ANG)).get_fdata()
-                    ecc_map = cast(Any, nib).load(str(data_dir / FNAME_ECC)).get_fdata()
-                    sigma_map = cast(Any, nib).load(str(data_dir / FNAME_SIGMA)).get_fdata()
-                    aparc_roi = cast(Any, nib).load(str(data_dir / FNAME_APARC)).get_fdata()
-                    label_map = cast(Any, nib).load(str(data_dir / FNAME_LABEL)).get_fdata()
-                except FileNotFoundError as exc:
-                    print(f"[skip] subject {subject}: missing required file - {exc}")
-                    continue
+        try:
+            polar_map = cast(Any, nib).load(str(data_dir / FNAME_ANG)).get_fdata()
+            ecc_map = cast(Any, nib).load(str(data_dir / FNAME_ECC)).get_fdata()
+            sigma_map = cast(Any, nib).load(str(data_dir / FNAME_SIGMA)).get_fdata()
+            aparc_roi = cast(Any, nib).load(str(data_dir / FNAME_APARC)).get_fdata()
+            label_map = cast(Any, nib).load(str(data_dir / FNAME_LABEL)).get_fdata()
+        except FileNotFoundError as exc:
+            print(f"[skip] {sample_id}: missing required file - {exc}")
+            continue
 
-                dot = ecc_map * polar_map
-                good_coords = np.asarray(np.where(dot != 0.0))
+        dot = ecc_map * polar_map
+        good_coords = np.asarray(np.where(dot != 0.0))
 
-                cs_coords_rh = np.where(aparc_roi == 1021)
-                cs_coords_lh = np.where(aparc_roi == 2021)
-                gm_coords_rh = np.where((aparc_roi >= 1000) & (aparc_roi < 2000))
-                gm_coords_lh = np.where(aparc_roi > 2000)
+        cs_coords_rh = np.where(aparc_roi == 1021)
+        cs_coords_lh = np.where(aparc_roi == 2021)
+        gm_coords_rh = np.where((aparc_roi >= 1000) & (aparc_roi < 2000))
+        gm_coords_lh = np.where(aparc_roi > 2000)
 
-                xl, yl, zl = get_xyz(gm_coords_lh)
-                xr, yr, zr = get_xyz(gm_coords_rh)
-                gm_lh = np.array([xl, yl, zl]).T
-                gm_rh = np.array([xr, yr, zr]).T
+        xl, yl, zl = get_xyz(gm_coords_lh)
+        xr, yr, zr = get_xyz(gm_coords_rh)
+        gm_lh = np.array([xl, yl, zl]).T
+        gm_rh = np.array([xr, yr, zr]).T
 
-                v1_coords = np.asarray(np.where(label_map == 1))
-                v2_coords = np.asarray(np.where(label_map == 2))
-                v3_coords = np.asarray(np.where(label_map == 3))
+        v1_coords = np.asarray(np.where(label_map == 1))
+        v2_coords = np.asarray(np.where(label_map == 2))
+        v3_coords = np.asarray(np.where(label_map == 3))
 
-                good_coords_lh = coords_intersection(good_coords, np.asarray(gm_coords_lh))
-                good_coords_rh = coords_intersection(good_coords, np.asarray(gm_coords_rh))
-                v1_coords_lh = coords_intersection(v1_coords, np.asarray(gm_coords_lh))
-                v1_coords_rh = coords_intersection(v1_coords, np.asarray(gm_coords_rh))
-                v2_coords_lh = coords_intersection(v2_coords, np.asarray(gm_coords_lh))
-                v2_coords_rh = coords_intersection(v2_coords, np.asarray(gm_coords_rh))
-                v3_coords_lh = coords_intersection(v3_coords, np.asarray(gm_coords_lh))
-                v3_coords_rh = coords_intersection(v3_coords, np.asarray(gm_coords_rh))
+        good_coords_lh = coords_intersection(good_coords, np.asarray(gm_coords_lh))
+        good_coords_rh = coords_intersection(good_coords, np.asarray(gm_coords_rh))
+        v1_coords_lh = coords_intersection(v1_coords, np.asarray(gm_coords_lh))
+        v1_coords_rh = coords_intersection(v1_coords, np.asarray(gm_coords_rh))
+        v2_coords_lh = coords_intersection(v2_coords, np.asarray(gm_coords_lh))
+        v2_coords_rh = coords_intersection(v2_coords, np.asarray(gm_coords_rh))
+        v3_coords_lh = coords_intersection(v3_coords, np.asarray(gm_coords_lh))
+        v3_coords_rh = coords_intersection(v3_coords, np.asarray(gm_coords_rh))
 
-                median_lh = [np.median(cs_coords_lh[0]), np.median(cs_coords_lh[1]), np.median(cs_coords_lh[2])]
-                median_rh = [np.median(cs_coords_rh[0]), np.median(cs_coords_rh[1]), np.median(cs_coords_rh[2])]
+        median_lh = [np.median(cs_coords_lh[0]), np.median(cs_coords_lh[1]), np.median(cs_coords_lh[2])]
+        median_rh = [np.median(cs_coords_rh[0]), np.median(cs_coords_rh[1]), np.median(cs_coords_rh[2])]
+
+        sample_aggregate_records: list[dict] = []
+
+        for (a, b, c), loss_name in zip(LOSS_COMB, LOSS_NAMES):
+            for target_path in target_paths:
+                target_name = target_path.stem
+                target_density = normalize_density(np.load(target_path))
+                if target_density.ndim != 2:
+                    raise ValueError(f"target map must be 2D, got shape={target_density.shape} for {target_path}")
+                target_map_shape = target_density.shape
 
                 print(f"target: {target_name}")
                 print(f"loss: {loss_name}")
@@ -444,8 +457,8 @@ def run() -> None:
                 ]
 
                 for gm_mask, hem, start_location, good_h, v1_h, v2_h, v3_h, dim_beta in hemi_iter:
-                    data_id = f"{subject}_{hem}_V1_n1000_1x10_{loss_name}_{THRESH}_{target_name}"
-                    run_dir = output_root / target_name / data_id
+                    data_id = f"{dataset_name}_{subject}_{hem}_V1_n1000_1x10_{loss_name}_{THRESH}_{target_name}"
+                    run_dir = sample_dir / target_name / data_id
                     results_json_path = run_dir / "results.json"
 
                     if results_json_path.exists() and not OVERWRITE:
@@ -770,44 +783,48 @@ def run() -> None:
                         json.dump(results, f, indent=2)
                     print(f"saved: {run_dir}")
 
-                    aggregate_records.append(
-                        {
-                            "target_name": target_name,
-                            "subject": subject,
-                            "hemisphere": hem,
-                            "run_dir": str(run_dir),
-                            "DC": float(dice),
-                            "Y": float(grid_yield),
-                            "HD": float(hell_d),
-                            "score": float(score),
-                            "loss": float(loss),
-                            "contact_count": int(contact_count),
-                            "active_count": int(active_count),
-                            "active_contact_count": int(active_contact_count),
-                            "active_ratio": float(active_ratio),
-                            "good_contact_count": int(good_contact_count),
-                            "good_contact_ratio": float(good_contact_ratio),
-                            "mean_activation": float(mean_activation),
-                            "max_activation": float(max_activation),
-                            "min_activation": float(min_activation),
-                            "simulator_forward_calls": int(call_stats["simulator_forward_calls"]),
-                            "model_forward_calls": int(call_stats["model_forward_calls"]),
-                            "simulator_calls_per_eval": float(simulator_calls_per_eval),
-                            "model_calls_per_eval": float(model_calls_per_eval),
-                            "wall_clock_time": float(wall_clock_time),
-                            "model_forward_time": float(model_forward_time),
-                            "simulator_forward_time": float(simulator_forward_time),
-                            "metric_computation_time": float(metric_computation_time),
-                            "normalized_wall_clock_time": float(normalized_wall),
-                            "evals_per_second": float(evals_per_second),
-                            "model_forward_time_per_call": float(model_forward_time_per_call),
-                            "seed": int(RESEARCH_SEED),
-                            "grid_valid": bool(grid_valid),
-                        }
-                    )
+                    record = {
+                        "dataset": dataset_name,
+                        "target_name": target_name,
+                        "subject": subject,
+                        "hemisphere": hem,
+                        "run_dir": str(run_dir),
+                        "DC": float(dice),
+                        "Y": float(grid_yield),
+                        "HD": float(hell_d),
+                        "score": float(score),
+                        "loss": float(loss),
+                        "contact_count": int(contact_count),
+                        "active_count": int(active_count),
+                        "active_contact_count": int(active_contact_count),
+                        "active_ratio": float(active_ratio),
+                        "good_contact_count": int(good_contact_count),
+                        "good_contact_ratio": float(good_contact_ratio),
+                        "mean_activation": float(mean_activation),
+                        "max_activation": float(max_activation),
+                        "min_activation": float(min_activation),
+                        "simulator_forward_calls": int(call_stats["simulator_forward_calls"]),
+                        "model_forward_calls": int(call_stats["model_forward_calls"]),
+                        "simulator_calls_per_eval": float(simulator_calls_per_eval),
+                        "model_calls_per_eval": float(model_calls_per_eval),
+                        "wall_clock_time": float(wall_clock_time),
+                        "model_forward_time": float(model_forward_time),
+                        "simulator_forward_time": float(simulator_forward_time),
+                        "metric_computation_time": float(metric_computation_time),
+                        "normalized_wall_clock_time": float(normalized_wall),
+                        "evals_per_second": float(evals_per_second),
+                        "model_forward_time_per_call": float(model_forward_time_per_call),
+                        "seed": int(RESEARCH_SEED),
+                        "grid_valid": bool(grid_valid),
+                    }
+                    sample_aggregate_records.append(record)
+                    global_aggregate_records.append(record)
 
-    write_aggregate_outputs(aggregate_records, output_root / "aggregate")
-    print(f"aggregate saved: {output_root / 'aggregate'}")
+        write_aggregate_outputs(sample_aggregate_records, sample_dir / "aggregate")
+        print(f"sample aggregate saved: {sample_dir / 'aggregate'}")
+
+    write_aggregate_outputs(global_aggregate_records, output_root / "aggregate")
+    print(f"global aggregate saved: {output_root / 'aggregate'}")
 
 
 if __name__ == "__main__":
