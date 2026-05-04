@@ -17,7 +17,6 @@ implant.translate_cube
 '''
 
 import math
-import mathutils
 import numpy as np
 from math import radians
 from PIL import Image, ImageDraw
@@ -57,44 +56,46 @@ def get_xyz(data, UNDERSAMPLING = 1):
 def transform(points,
               TRANSLATION_X=0,TRANSLATION_Y=0,TRANSLATION_Z=0,
               ROTATION_ANGLE_X=0,ROTATION_ANGLE_Y=0,ROTATION_ANGLE_Z=0):
-    
-    '''
-    # The input is a matrix like this:
-    # (n_points, 3 + 1)
-    #   [[x1, x2]
-    #    [y1, y2]
-    #    [z1, z2]
-    #    [1,  1]]
-    
-    # The output is a matrix like this:
-    #   [[x1', x2']
-    #    [y1', y2']
-    #    [z1', z2']]
-    #    [1,   1]]
-    '''
 
-    mat_rot_x = mathutils.Matrix.Rotation(radians(ROTATION_ANGLE_X), 4, 'X')
-    mat_rot_y = mathutils.Matrix.Rotation(radians(ROTATION_ANGLE_Y), 4, 'Y')
-    mat_rot_z = mathutils.Matrix.Rotation(radians(ROTATION_ANGLE_Z), 4, 'Z')
-    
-    mat_trans_x = mathutils.Matrix.Translation(mathutils.Vector((TRANSLATION_X,0,0)))
-    mat_trans_y = mathutils.Matrix.Translation(mathutils.Vector((0,TRANSLATION_Y,0)))
-    mat_trans_z = mathutils.Matrix.Translation(mathutils.Vector((0,0,TRANSLATION_Z)))
-    
-    trans_x = np.array(mat_trans_x)
-    trans_y = np.array(mat_trans_y)
-    trans_z = np.array(mat_trans_z)
-    
-    rot_x = np.array(mat_rot_x)
-    rot_y = np.array(mat_rot_y)
-    rot_z = np.array(mat_rot_z)
+    def rot_matrix_x(a):
+        a = radians(a)
+        return np.array([
+            [1, 0,           0,          0],
+            [0, np.cos(a),  -np.sin(a),  0],
+            [0, np.sin(a),   np.cos(a),  0],
+            [0, 0,           0,          1]], dtype=np.float32)
 
-    # Join transformation matrices
-#     print('Warning: in function transform, we are first rotating, then translating')
-    transform = rot_x @ rot_y @ rot_z @ trans_x @ trans_y @ trans_z
+    def rot_matrix_y(a):
+        a = radians(a)
+        return np.array([
+            [ np.cos(a), 0, np.sin(a), 0],
+            [ 0,         1, 0,         0],
+            [-np.sin(a), 0, np.cos(a), 0],
+            [ 0,         0, 0,         1]], dtype=np.float32)
 
-    # Apply transformations and return
-    return (transform @ points).astype('float32')
+    def rot_matrix_z(a):
+        a = radians(a)
+        return np.array([
+            [np.cos(a), -np.sin(a), 0, 0],
+            [np.sin(a),  np.cos(a), 0, 0],
+            [0,          0,         1, 0],
+            [0,          0,         0, 1]], dtype=np.float32)
+
+    def trans_matrix(tx, ty, tz):
+        return np.array([
+            [1, 0, 0, tx],
+            [0, 1, 0, ty],
+            [0, 0, 1, tz],
+            [0, 0, 0, 1 ]], dtype=np.float32)
+
+    rot_x = rot_matrix_x(ROTATION_ANGLE_X)
+    rot_y = rot_matrix_y(ROTATION_ANGLE_Y)
+    rot_z = rot_matrix_z(ROTATION_ANGLE_Z)
+    trans = trans_matrix(TRANSLATION_X, TRANSLATION_Y, TRANSLATION_Z)
+
+    transform_mat = rot_x @ rot_y @ rot_z @ trans
+
+    return (transform_mat @ points).astype('float32')
 
 def create_cube(xBase, yBase, height, xmax, ymax, zmax):
     
